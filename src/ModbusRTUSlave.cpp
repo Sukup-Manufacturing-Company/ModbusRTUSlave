@@ -1,11 +1,12 @@
 #include "ModbusRTUSlave.h"
 
-ModbusRTUSlave::ModbusRTUSlave(Stream& serial, uint8_t *buf, uint16_t bufSize, uint8_t dePin, uint32_t responseDelay) {
+ModbusRTUSlave::ModbusRTUSlave(Stream& serial, uint8_t *buf, uint16_t bufSize, uint8_t dePin, uint32_t responseDelay, void (*txirq_enable_disable)(bool)) {
   _serial = &serial;
   _buf = buf;
   _bufSize = bufSize;
   _dePin = dePin;
   _responseDelay = responseDelay;
+  _txirq_enable_disable = txirq_enable_disable;
 }
 
 void ModbusRTUSlave::configureCoils(uint16_t numCoils, BoolRead coilRead, BoolWrite coilWrite) {
@@ -204,7 +205,7 @@ void ModbusRTUSlave::_exceptionResponse(uint8_t code) {
   _write(3);
 }
 
-void ModbusRTUSlave::_write(uint8_t len) {
+void ModbusRTUSlave::_write(uint8_t len, bool blocking) {
   delay(_responseDelay);
   if (_buf[0] != 0) {
     uint16_t crc = _crc(len);
@@ -212,8 +213,14 @@ void ModbusRTUSlave::_write(uint8_t len) {
     _buf[len + 1] = highByte(crc);
     if (_dePin != 255) digitalWrite(_dePin, HIGH);
     _serial->write(_buf, len + 2);
-    _serial->flush();
-    if (_dePin != 255) digitalWrite(_dePin, LOW);
+    if (blocking || !_txirq_enable_disable){ // if explicitly blocking or if _txirq_enable_disable() is not provided
+      _serial->flush();
+      if (_dePin != 255) digitalWrite(_dePin, LOW);
+    } else {
+      _txirq_enable_disable(true); // provided by project
+    }
+    
+    
   }
 }
 
@@ -238,4 +245,9 @@ uint16_t ModbusRTUSlave::_div8RndUp(uint16_t value) {
 
 uint16_t ModbusRTUSlave::_bytesToWord(uint8_t high, uint8_t low) {
   return (high << 8) | low;
+}
+
+void ModbusRTUSlave::txDone_irq(void){
+  _txirq_enable_disable(false); // provided by project
+  if (_dePin != 255) digitalWrite(_dePin, LOW);
 }
