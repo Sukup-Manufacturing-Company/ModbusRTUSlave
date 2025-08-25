@@ -38,6 +38,8 @@ class ModbusRTUSlave {
     uint16_t _numDiscreteInputs = 0;
     uint16_t _numHoldingRegisters = 0;
     uint16_t _numInputRegisters = 0;
+    uint16_t _bufpos = 0;
+    uint16_t _writesize = 0;
     BoolRead _coilRead;
     BoolRead _discreteInputRead;
     WordRead _holdingRegisterRead;

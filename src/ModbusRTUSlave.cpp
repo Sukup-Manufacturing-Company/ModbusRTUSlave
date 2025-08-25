@@ -212,12 +212,32 @@ void ModbusRTUSlave::_write(uint8_t len, bool blocking) {
     _buf[len] = lowByte(crc);
     _buf[len + 1] = highByte(crc);
     if (_dePin != 255) digitalWrite(_dePin, HIGH);
-    _serial->write(_buf, len + 2);
-    if (blocking || !_txirq_enable_disable){ // if explicitly blocking or if _txirq_enable_disable() is not provided
+    _writesize = len + 2;
+
+    // chunk writes under the following conditions:
+    // 1. trying to write more than available buffer space
+    // 2. we're not blocking
+    // 3. we have an interrupt enable/disable function defined
+    //
+    // if not, write entire buffer
+    if (_writesize > (uint16_t)_serial->availableForWrite() && !blocking && _txirq_enable_disable){
+      _bufpos = (uint16_t)_serial->availableForWrite();
+      _serial->write(_buf, _bufpos);
+    } else {
+      _serial->write(_buf, _writesize);
+      _bufpos = _writesize;
+    }
+
+    // enable interrupt under the following conditions:
+    // 1. we're not blocking
+    // 2. we have an interrupt enable/disable function defined
+    //
+    // if not, flush and write dePin low
+    if (!blocking && _txirq_enable_disable){
+      _txirq_enable_disable(true); // provided by project
+    } else {
       _serial->flush();
       if (_dePin != 255) digitalWrite(_dePin, LOW);
-    } else {
-      _txirq_enable_disable(true); // provided by project
     }
     
     
@@ -248,6 +268,20 @@ uint16_t ModbusRTUSlave::_bytesToWord(uint8_t high, uint8_t low) {
 }
 
 void ModbusRTUSlave::txDone_irq(void){
-  _txirq_enable_disable(false); // provided by project
-  if (_dePin != 255) digitalWrite(_dePin, LOW);
+  // runtime ~432us on atmega328pb at 16mhz. Is that too much?
+  // if nothing more to write, disable interrupt and set dePin low
+  if (_bufpos == _writesize){
+    _txirq_enable_disable(false); // provided by project
+    if (_dePin != 255) digitalWrite(_dePin, LOW);
+
+  // if more than TX buffer left, write the next chunk and move the marker
+  } else if (_writesize - _bufpos > SERIAL_TX_BUFFER_SIZE){
+    _serial->write(_buf + _bufpos, SERIAL_TX_BUFFER_SIZE);
+    _bufpos = _bufpos + SERIAL_TX_BUFFER_SIZE;
+
+  // write the remainder of the message and move the marker
+  } else {
+    _serial->write(_buf + _bufpos, _writesize - _bufpos);
+    _bufpos = _writesize;
+  }
 }
