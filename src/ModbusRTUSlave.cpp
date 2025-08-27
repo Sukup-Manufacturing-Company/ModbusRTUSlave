@@ -75,9 +75,6 @@ void ModbusRTUSlave::poll() {
   // Check if we can add any more data to buffer, even one byte.
   // The DxCore TX buffer is 64 bytes deep - at 19200 baud and 11 bits per byte,
   // this _cannot_ be blocked for more than 36ms!!
-  //
-  // This only applies if we have hardware control of XDIR!
-  // TODO: use this for 328pb as well, even though we have the TXC interrupt available
   if (!_blocking && _bufpos != _writesize && _serial->availableForWrite()) {
     int writesize = _serial->availableForWrite();
 
@@ -302,22 +299,6 @@ uint16_t ModbusRTUSlave::_bytesToWord(uint8_t high, uint8_t low) {
 }
 
 void ModbusRTUSlave::txDone_irq(void){
-  // TODO: this to only do the RE/DE pin disable, and otherwise use the normal
-  //       poll() buffer refill.
-  // runtime ~432us on atmega328pb at 16mhz. Is that too much?
-  // if nothing more to write, disable interrupt and set dePin low
-  if (_bufpos == _writesize){
-    _txirq_enable_disable(false); // provided by project
-    if (_dePin != 255) digitalWrite(_dePin, LOW);
-
-  // if more than TX buffer left, write the next chunk and move the marker
-  } else if (_writesize - _bufpos > SERIAL_TX_BUFFER_SIZE){
-    _serial->write(_buf + _bufpos, SERIAL_TX_BUFFER_SIZE);
-    _bufpos = _bufpos + SERIAL_TX_BUFFER_SIZE;
-
-  // write the remainder of the message and move the marker
-  } else {
-    _serial->write(_buf + _bufpos, _writesize - _bufpos);
-    _bufpos = _writesize;
-  }
+  _txirq_enable_disable(false); // provided by project
+  if (_dePin != 255) digitalWrite(_dePin, LOW);
 }
