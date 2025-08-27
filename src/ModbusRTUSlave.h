@@ -16,7 +16,12 @@
 
 class ModbusRTUSlave {
   public:
-    ModbusRTUSlave(Stream& serial, uint8_t *buf, uint16_t bufSize, uint8_t dePin = NO_DE_PIN, uint32_t responseDelay = 0, void (*txirq_enable_disable)(bool) = 0);
+    ModbusRTUSlave(Stream& serial,
+                    uint8_t *buf, uint16_t bufSize,
+                    uint8_t dePin = NO_DE_PIN,
+                    uint32_t responseDelay = 0,
+                    void (*txirq_enable_disable)(bool) = 0,
+                    bool blocking=true);
     typedef int8_t (*BoolRead)(uint16_t, uint8_t*);
     typedef bool (*BoolWrite)(uint16_t, bool);
     typedef int32_t (*WordRead)(uint16_t, uint8_t*);
@@ -40,6 +45,7 @@ class ModbusRTUSlave {
     uint16_t _numInputRegisters = 0;
     uint16_t _bufpos = 0;
     uint16_t _writesize = 0;
+    bool _blocking;
     BoolRead _coilRead;
     BoolRead _discreteInputRead;
     WordRead _holdingRegisterRead;
@@ -54,7 +60,7 @@ class ModbusRTUSlave {
     void _processBoolRead(uint16_t numBools, BoolRead boolRead);
     void _processWordRead(uint16_t numWords, WordRead wordRead);
     void _exceptionResponse(uint8_t code);
-    void _write(uint8_t len, bool blocking=false);
+    void _write(uint8_t len);
     uint16_t _crc(uint8_t len);
     uint16_t _div8RndUp(uint16_t value);
     uint16_t _bytesToWord(uint8_t high, uint8_t low);

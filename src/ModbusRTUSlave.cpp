@@ -1,12 +1,19 @@
 #include "ModbusRTUSlave.h"
 
-ModbusRTUSlave::ModbusRTUSlave(Stream& serial, uint8_t *buf, uint16_t bufSize, uint8_t dePin, uint32_t responseDelay, void (*txirq_enable_disable)(bool)) {
+ModbusRTUSlave::ModbusRTUSlave(Stream& serial,
+                                uint8_t *buf,
+                                uint16_t bufSize,
+                                uint8_t dePin,
+                                uint32_t responseDelay,
+                                void (*txirq_enable_disable)(bool),
+                                bool blocking) {
   _serial = &serial;
   _buf = buf;
   _bufSize = bufSize;
   _dePin = dePin;
   _responseDelay = responseDelay;
   _txirq_enable_disable = txirq_enable_disable;
+  _blocking = blocking;
 }
 
 void ModbusRTUSlave::configureCoils(uint16_t numCoils, BoolRead coilRead, BoolWrite coilWrite) {
@@ -60,6 +67,32 @@ void ModbusRTUSlave::begin(uint8_t id, uint32_t baud, uint8_t config) {
 }
 
 void ModbusRTUSlave::poll() {
+  // Non-ISR non-blocking operation:
+  // On DxCore, the TXC interrupt is already used, so we can't use it for this.
+  // Apparently writing to serial from within an ISR is bad practice anyway
+  // (though at the low baud rates we operate at it seems to be fine).
+  //
+  // Check if we can add any more data to buffer, even one byte.
+  // The DxCore TX buffer is 64 bytes deep - at 19200 baud and 11 bits per byte,
+  // this _cannot_ be blocked for more than 36ms!!
+  //
+  // This only applies if we have hardware control of XDIR!
+  // TODO: use this for 328pb as well, even though we have the TXC interrupt available
+  if (!_blocking && _bufpos != _writesize && _serial->availableForWrite()) {
+    int writesize = _serial->availableForWrite();
+
+    // write as much as we can
+    if (_writesize - _bufpos > (uint16_t)writesize){
+      _serial->write(_buf + _bufpos, writesize);
+      _bufpos = _bufpos + (uint16_t)writesize;
+
+    // write the remainder of the message and move the marker
+    } else {
+      _serial->write(_buf + _bufpos, _writesize - _bufpos);
+      _bufpos = _writesize;
+    }
+  }
+
   if (_serial->available() > 0) {
     uint8_t i = 0;
     uint32_t startTime = 0;
@@ -205,7 +238,7 @@ void ModbusRTUSlave::_exceptionResponse(uint8_t code) {
   _write(3);
 }
 
-void ModbusRTUSlave::_write(uint8_t len, bool blocking) {
+void ModbusRTUSlave::_write(uint8_t len) {
   delay(_responseDelay);
   if (_buf[0] != 0) {
     uint16_t crc = _crc(len);
@@ -217,10 +250,9 @@ void ModbusRTUSlave::_write(uint8_t len, bool blocking) {
     // chunk writes under the following conditions:
     // 1. trying to write more than available buffer space
     // 2. we're not blocking
-    // 3. we have an interrupt enable/disable function defined
     //
     // if not, write entire buffer
-    if (_writesize > (uint16_t)_serial->availableForWrite() && !blocking && _txirq_enable_disable){
+    if (_writesize > (uint16_t)_serial->availableForWrite() && !_blocking){
       _bufpos = (uint16_t)_serial->availableForWrite();
       _serial->write(_buf, _bufpos);
     } else {
@@ -232,10 +264,12 @@ void ModbusRTUSlave::_write(uint8_t len, bool blocking) {
     // 1. we're not blocking
     // 2. we have an interrupt enable/disable function defined
     //
-    // if not, flush and write dePin low
-    if (!blocking && _txirq_enable_disable){
+    // if blocking, flush and write dePin low
+    //
+    // otherwise, we will check back in on this once we come around to poll()
+    if (!_blocking && _txirq_enable_disable){
       _txirq_enable_disable(true); // provided by project
-    } else {
+    } else if (_blocking) {
       _serial->flush();
       if (_dePin != 255) digitalWrite(_dePin, LOW);
     }
@@ -268,6 +302,8 @@ uint16_t ModbusRTUSlave::_bytesToWord(uint8_t high, uint8_t low) {
 }
 
 void ModbusRTUSlave::txDone_irq(void){
+  // TODO: this to only do the RE/DE pin disable, and otherwise use the normal
+  //       poll() buffer refill.
   // runtime ~432us on atmega328pb at 16mhz. Is that too much?
   // if nothing more to write, disable interrupt and set dePin low
   if (_bufpos == _writesize){
