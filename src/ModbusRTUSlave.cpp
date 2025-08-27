@@ -67,30 +67,12 @@ void ModbusRTUSlave::begin(uint8_t id, uint32_t baud, uint8_t config) {
 }
 
 void ModbusRTUSlave::poll() {
-  // Non-ISR non-blocking operation:
-  // On DxCore, the TXC interrupt is already used, so we can't use it for this.
-  // Apparently writing to serial from within an ISR is bad practice anyway
-  // (though at the low baud rates we operate at it seems to be fine).
-  //
-  // Check if we can add any more data to buffer, even one byte.
-  // The DxCore TX buffer is 64 bytes deep - at 19200 baud and 11 bits per byte,
-  // this _cannot_ be blocked for more than 36ms!!
-  if (!_blocking && _bufpos != _writesize && _serial->availableForWrite()) {
-    int writesize = _serial->availableForWrite();
-
-    // write as much as we can
-    if (_writesize - _bufpos > (uint16_t)writesize){
-      _serial->write(_buf + _bufpos, writesize);
-      _bufpos = _bufpos + (uint16_t)writesize;
-
-    // write the remainder of the message and move the marker
-    } else {
-      _serial->write(_buf + _bufpos, _writesize - _bufpos);
-      _bufpos = _writesize;
-    }
-  }
-
   if (_serial->available() > 0) {
+    // If we got blocked for too long prior and now there is new data, ensure we don't
+    // reload the transmit buffer
+    _bufpos = 0;
+    _writesize = 0;
+
     uint8_t i = 0;
     uint32_t startTime = 0;
     bool respond = false;
@@ -184,6 +166,27 @@ void ModbusRTUSlave::poll() {
           _exceptionResponse(1);
           break;
       }
+    }
+  // Non-ISR non-blocking operation:
+  // On DxCore, the TXC interrupt is already used, so we can't use it for this.
+  // Apparently writing to serial from within an ISR is bad practice anyway
+  // (though at the low baud rates we operate at it seems to be fine).
+  //
+  // Check if we can add any more data to buffer, even one byte.
+  // The DxCore TX buffer is 64 bytes deep - at 19200 baud and 11 bits per byte,
+  // this _cannot_ be blocked for more than 36ms!!
+  } else if (!_blocking && _bufpos != _writesize && _serial->availableForWrite()) {
+    int writesize = _serial->availableForWrite();
+
+    // write as much as we can
+    if (_writesize - _bufpos > (uint16_t)writesize){
+      _serial->write(_buf + _bufpos, writesize);
+      _bufpos = _bufpos + (uint16_t)writesize;
+
+    // write the remainder of the message and move the marker
+    } else {
+      _serial->write(_buf + _bufpos, _writesize - _bufpos);
+      _bufpos = _writesize;
     }
   }
 }
