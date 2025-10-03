@@ -30,6 +30,7 @@ class ModbusRTUSlave {
     void configureDiscreteInputs(uint16_t numDiscreteInputs, BoolRead discreteInputRead);
     void configureHoldingRegisters(uint16_t numHoldingRegisters, WordRead holdingRegisterRead, WordWrite holdingRegisterWrite);
     void configureInputRegisters(uint16_t numInputRegisters, WordRead inputRegisterRead);
+    /* NOTE: Be sure to always check getTransmitting() before changing settings and calling begin()!! */
     void begin(uint8_t id, uint32_t baud, uint8_t config = 0x06);
     void poll();
     void txDone_irq(void);
