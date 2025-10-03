@@ -33,6 +33,7 @@ class ModbusRTUSlave {
     void begin(uint8_t id, uint32_t baud, uint8_t config = 0x06);
     void poll();
     void txDone_irq(void);
+    bool getTransmitting(void);
     
   private:
     Stream *_serial;
@@ -46,6 +47,7 @@ class ModbusRTUSlave {
     uint16_t _bufpos = 0;
     uint16_t _writesize = 0;
     bool _blocking;
+    bool _transmitting;
     BoolRead _coilRead;
     BoolRead _discreteInputRead;
     WordRead _holdingRegisterRead;

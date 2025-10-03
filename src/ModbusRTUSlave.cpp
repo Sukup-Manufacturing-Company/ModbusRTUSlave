@@ -14,6 +14,7 @@ ModbusRTUSlave::ModbusRTUSlave(Stream& serial,
   _responseDelay = responseDelay;
   _txirq_enable_disable = txirq_enable_disable;
   _blocking = blocking;
+  _transmitting = false;
 }
 
 void ModbusRTUSlave::configureCoils(uint16_t numCoils, BoolRead coilRead, BoolWrite coilWrite) {
@@ -241,6 +242,7 @@ void ModbusRTUSlave::_exceptionResponse(uint8_t code) {
 void ModbusRTUSlave::_write(uint8_t len) {
   delay(_responseDelay);
   if (_buf[0] != 0) {
+    _transmitting = true;
     uint16_t crc = _crc(len);
     _buf[len] = lowByte(crc);
     _buf[len + 1] = highByte(crc);
@@ -272,10 +274,15 @@ void ModbusRTUSlave::_write(uint8_t len) {
     } else if (_blocking) {
       _serial->flush();
       if (_dePin != 255) digitalWrite(_dePin, LOW);
+      _transmitting = false;
     }
     
     
   }
+}
+
+bool ModbusRTUSlave::getTransmitting(void) {
+  return _transmitting;
 }
 
 uint16_t ModbusRTUSlave::_crc(uint8_t len) {
@@ -304,4 +311,5 @@ uint16_t ModbusRTUSlave::_bytesToWord(uint8_t high, uint8_t low) {
 void ModbusRTUSlave::txDone_irq(void){
   _txirq_enable_disable(false); // provided by project
   if (_dePin != 255) digitalWrite(_dePin, LOW);
+  _transmitting = false;
 }
