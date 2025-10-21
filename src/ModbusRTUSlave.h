@@ -59,6 +59,7 @@ class ModbusRTUSlave {
     uint32_t _charTimeout;
     uint32_t _frameTimeout;
     uint32_t _responseDelay;
+    uint32_t _rxStartTime;
     void (*_txirq_enable_disable)(bool);
     void _processBoolRead(uint16_t numBools, BoolRead boolRead);
     void _processWordRead(uint16_t numWords, WordRead wordRead);
