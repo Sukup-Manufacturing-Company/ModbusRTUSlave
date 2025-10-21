@@ -243,6 +243,10 @@ void ModbusRTUSlave::poll() {
       // The consequences are low - in this condition, transmit should complete on its own,
       // and we by definition cannot receive data while transmitting anyway.
       //
+      // The worst consequences are if the next operation is something which changes the serial
+      // port's settings - data may be lost in this case, so the user will be responsible for checking
+      // the transmission is done somehow.
+      //
       // If we are not blocking but _do_ have a transmit irq defined,
       // _transmitting is toggled to false in the IRQ, so this is not needed.
       if (!_blocking && *_txirq_enable_disable == 0 && _bufpos == _writesize) {
@@ -354,18 +358,14 @@ void ModbusRTUSlave::_write(uint8_t len) {
   }
 }
 
-// we can't trust _transmitting for anything outside this library.
+// we can't trust _transmitting for anything outside this library, IF NOT USING TXIRQ!
 // Specifically, if we are on a board with no TxIRQ but doing non-blocking operation
-// (that would be modern AVRs - using the hardware XDIR), _transmitting will be set
-// to false when we load the last set of data into buffer, not when we are actually done.
-// To get around this, we can also check if the whole TX buffer is available for write.
-// Likewise, we don't want to only trust availableForWrite(), because that may be empty
-// and waiting to be refilled!
+// _transmitting will be set to false when we load the last set of data into buffer,
+// not when we are actually done.
 //
-// This is not an issue when we have a TxIRQ (like on atmega328pb), but the extra check
-// does not behave any differently so there is no reason to not use it.
+// TxIRQ users can trust this.
 bool ModbusRTUSlave::getTransmitting(void) {
-  return _transmitting || (_serial->availableForWrite() < SERIAL_TX_BUFFER_SIZE-1);
+  return _transmitting;
 }
 
 uint16_t ModbusRTUSlave::_crc(uint8_t len) {
