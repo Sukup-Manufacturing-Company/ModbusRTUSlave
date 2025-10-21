@@ -42,7 +42,7 @@ void ModbusRTUSlave::configureInputRegisters(uint16_t numInputRegisters, WordRea
 void ModbusRTUSlave::begin(uint8_t id, uint32_t baud, uint8_t config) {
   _id = id;
   uint32_t bitsPerChar;
-  uint32_t startTime = micros();
+  _rxStartTime = micros();
 
   if (config == SERIAL_8E2 || config == SERIAL_8O2) bitsPerChar = 12;
   else if (config == SERIAL_8N2 || config == SERIAL_8E1 || config == SERIAL_8O1) bitsPerChar = 11;
@@ -61,42 +61,82 @@ void ModbusRTUSlave::begin(uint8_t id, uint32_t baud, uint8_t config) {
   }
   do {
     if (_serial->available() > 0) {
-      startTime = micros();
+      _rxStartTime = micros();
       _serial->read();
     }
-  } while (micros() - startTime < _frameTimeout);
+  } while (micros() - _rxStartTime < _frameTimeout);
 }
 
 void ModbusRTUSlave::poll() {
-  if (_serial->available() > 0) {
-    // If we got blocked for too long prior and now there is new data, ensure we don't
-    // reload the transmit buffer
-    _bufpos = 0;
-    _writesize = 0;
+  static uint8_t i = 0;
+  static enum pollstateenum {
+    STATE_IDLE,
+    STATE_FRAME_RX,
+    STATE_PARSE,
+    STATE_BUILD_REPLY,
+    STATE_TRANSMIT,
+  } pollstate = STATE_IDLE;
 
-    uint8_t i = 0;
-    uint32_t startTime = 0;
-    bool respond = false;
-    do {
+  switch (pollstate) {
+    case STATE_IDLE:
       if (_serial->available() > 0) {
-        startTime = micros();
+        _bufpos = 0;
+        _writesize = 0;
+        _rxStartTime = micros();
+        i = 0;
+
+        pollstate = STATE_FRAME_RX;
+      }
+      break;
+
+    case STATE_FRAME_RX:
+      while (_serial->available() > 0 && i < _bufSize) {
+        _rxStartTime = micros();
         _buf[i] = _serial->read();
         i++;
       }
-    } while (micros() - startTime < _charTimeout && i < _bufSize);
-
-    if (i >= 8) { /* minimum request length, given the FC subset we have implemented */
-      // may as well check all this while we wait for the frame timeout!
-      if ((_buf[0] == _id || _buf[0] == 0) && _crc(i - 2) == _bytesToWord(_buf[i - 1], _buf[i - 2])) {
-          respond = true;
+      
+      if (micros() - _rxStartTime > _charTimeout) {
+        pollstate = STATE_PARSE;
       }
-    }
-    if (respond == false) return; // may as well return now, frame is bad or not for us
 
-    while (micros() - startTime < _frameTimeout);
+      break;
 
-    // If there is data in the buffer, abort and do a go-around. New message takes priority.
-    if (_serial->available() == 0 && respond) {
+    case STATE_PARSE:
+      // this represents an error state, return to idle
+      // TODO: should register an error from this!
+      // TODO: should this check that time is less than frame timeout?
+      if (_serial->available() > 0) {
+        pollstate = STATE_IDLE;
+        break;
+      }
+
+      // minimum size
+      if (i >= 8) {
+        if ((_buf[0] == _id || _buf[0] == 0) && _crc(i - 2) == _bytesToWord(_buf[i - 1], _buf[i - 2])) {
+          pollstate = STATE_BUILD_REPLY;
+        } else {
+          pollstate = STATE_IDLE;
+        }
+      } else {
+        pollstate = STATE_IDLE;
+      }
+
+      break;
+    
+    case STATE_BUILD_REPLY:
+      // this represents an error state, return to idle
+      // TODO: should register an error from this!
+      if (_serial->available() > 0) {
+        pollstate = STATE_IDLE;
+        break;
+      }
+
+      // must wait at least _frameTimeout before responding
+      if (micros() - _rxStartTime < _frameTimeout) {
+        break; // go-around
+      }
+
       switch (_buf[1]) {
         case FC_01_R_COILS: /* Read Coils */
           _processBoolRead(_numCoils, _coilRead);
@@ -139,6 +179,7 @@ void ModbusRTUSlave::poll() {
               for (uint8_t j = 0; j < quantity; j++) {
                 if (!_coilWrite(startAddress + j, bitRead(_buf[7 + (j >> 3)], j & 7))) {
                   _exceptionResponse(4);
+                  pollstate = STATE_TRANSMIT;
                   return;
                 }
               }
@@ -156,6 +197,7 @@ void ModbusRTUSlave::poll() {
               for (uint8_t j = 0; j < quantity; j++) {
                 if (!_holdingRegisterWrite(startAddress + j, _bytesToWord(_buf[j * 2 + 7], _buf[j * 2 + 8]))) {
                   _exceptionResponse(4);
+                  pollstate = STATE_TRANSMIT;
                   return;
                 }
               }
@@ -167,28 +209,63 @@ void ModbusRTUSlave::poll() {
           _exceptionResponse(1);
           break;
       }
-    }
-  // Non-ISR non-blocking operation:
-  // On DxCore, the TXC interrupt is already used, so we can't use it for this.
-  // Apparently writing to serial from within an ISR is bad practice anyway
-  // (though at the low baud rates we operate at it seems to be fine).
-  //
-  // Check if we can add any more data to buffer, even one byte.
-  // The DxCore TX buffer is 64 bytes deep - at 19200 baud and 11 bits per byte,
-  // this _cannot_ be blocked for more than 36ms!!
-  } else if (!_blocking && _bufpos != _writesize && _serial->availableForWrite()) {
-    int writesize = _serial->availableForWrite();
+      pollstate = STATE_TRANSMIT;
+      /* FALLTHROUGH */
 
-    // write as much as we can
-    if (_writesize - _bufpos > (uint16_t)writesize){
-      _serial->write(_buf + _bufpos, writesize);
-      _bufpos = _bufpos + (uint16_t)writesize;
+    case STATE_TRANSMIT:
+      // Non-ISR non-blocking operation:
+      // On DxCore, the TXC interrupt is already used, so we can't use it for this.
+      // Apparently writing to serial from within an ISR is bad practice anyway
+      // (though at the low baud rates we operate at it seems to be fine).
+      //
+      // Check if we can add any more data to buffer, even one byte.
+      // The DxCore TX buffer is 64 bytes deep - at 19200 baud and 11 bits per byte,
+      // this _cannot_ be blocked for more than 36ms!!
+      if (!_blocking && _bufpos != _writesize && _serial->availableForWrite()) {
+        int writesize = _serial->availableForWrite();
 
-    // write the remainder of the message and move the marker
-    } else {
-      _serial->write(_buf + _bufpos, _writesize - _bufpos);
-      _bufpos = _writesize;
-    }
+        // write as much as we can
+        if (_writesize - _bufpos > (uint16_t)writesize){
+          _serial->write(_buf + _bufpos, writesize);
+          _bufpos = _bufpos + (uint16_t)writesize;
+
+        // write the remainder of the message and move the marker
+        // do not write if we have already written everything!
+        } else if (_bufpos != _writesize) {
+          _serial->write(_buf + _bufpos, _writesize - _bufpos);
+          _bufpos = _writesize;
+        }
+      }
+
+      // if we are not blocking but do not have a transmit irq defined,
+      // we have no way of getting feedback. If the buffer position matches writesize,
+      // all we can do is assume it's done and go back to IDLE!
+      // The consequences are low - in this condition, transmit should complete on its own,
+      // and we by definition cannot receive data while transmitting anyway.
+      //
+      // The worst consequences are if the next operation is something which changes the serial
+      // port's settings - data may be lost in this case, so the user will be responsible for checking
+      // the transmission is done somehow.
+      //
+      // If we are not blocking but _do_ have a transmit irq defined,
+      // _transmitting is toggled to false in the IRQ, so this is not needed.
+      if (!_blocking && *_txirq_enable_disable == 0 && _bufpos == _writesize) {
+        _transmitting = false;
+      }
+
+      // wait for transmission to finish
+      // blocking operation should still toggle _transmitting correctly
+      // TODO: some sort of safety timeout?
+      if (!_transmitting) {
+        pollstate = STATE_IDLE;
+      }
+
+      break;
+    
+    default:
+      pollstate = STATE_IDLE;
+
+      break;
   }
 }
 
@@ -281,6 +358,12 @@ void ModbusRTUSlave::_write(uint8_t len) {
   }
 }
 
+// we can't trust _transmitting for anything outside this library, IF NOT USING TXIRQ!
+// Specifically, if we are on a board with no TxIRQ but doing non-blocking operation
+// _transmitting will be set to false when we load the last set of data into buffer,
+// not when we are actually done.
+//
+// TxIRQ users can trust this.
 bool ModbusRTUSlave::getTransmitting(void) {
   return _transmitting;
 }
