@@ -6,7 +6,8 @@ ModbusRTUSlave::ModbusRTUSlave(Stream& serial,
                                 uint8_t dePin,
                                 uint32_t responseDelay,
                                 void (*txirq_enable_disable)(bool),
-                                bool blocking) {
+                                bool blocking,
+                                uint8_t multiChannel) : _multiCh(multiChannel) {
   _serial = &serial;
   _buf = buf;
   _bufSize = bufSize;
@@ -15,6 +16,11 @@ ModbusRTUSlave::ModbusRTUSlave(Stream& serial,
   _txirq_enable_disable = txirq_enable_disable;
   _blocking = blocking;
   _transmitting = false;
+  _offset = 0;
+  _limit = 227; // Protect reserved addresses
+  if(_multiCh > 0) {
+    Serial2.println("ModbusRTUSlave: Multi-channel mode enabled");
+  }
 }
 
 void ModbusRTUSlave::configureCoils(uint16_t numCoils, BoolRead coilRead, BoolWrite coilWrite) {
@@ -37,6 +43,28 @@ void ModbusRTUSlave::configureHoldingRegisters(uint16_t numHoldingRegisters, Wor
 void ModbusRTUSlave::configureInputRegisters(uint16_t numInputRegisters, WordRead inputRegisterRead){
   _numInputRegisters = numInputRegisters;
   _inputRegisterRead = inputRegisterRead;
+}
+
+void ModbusRTUSlave::configureCoils(uint16_t numCoils, BoolRead_mc coilRead, BoolWrite_mc coilWrite) {
+  _numCoils = numCoils;
+  _coilRead_mc = coilRead;
+  _coilWrite_mc = coilWrite;
+}
+
+void ModbusRTUSlave::configureDiscreteInputs(uint16_t numDiscreteInputs, BoolRead_mc discreteInputRead) {
+  _numDiscreteInputs = numDiscreteInputs;
+  _discreteInputRead_mc = discreteInputRead;
+}
+
+void ModbusRTUSlave::configureHoldingRegisters(uint16_t numHoldingRegisters, WordRead_mc holdingRegisterRead, WordWrite_mc holdingRegisterWrite) {
+  _numHoldingRegisters = numHoldingRegisters;
+  _holdingRegisterRead_mc = holdingRegisterRead;
+  _holdingRegisterWrite_mc = holdingRegisterWrite;
+}
+
+void ModbusRTUSlave::configureInputRegisters(uint16_t numInputRegisters, WordRead_mc inputRegisterRead){
+  _numInputRegisters = numInputRegisters;
+  _inputRegisterRead_mc = inputRegisterRead;
 }
 
 void ModbusRTUSlave::begin(uint8_t id, uint32_t baud, uint8_t config) {
@@ -113,8 +141,18 @@ void ModbusRTUSlave::poll() {
 
       // minimum size
       if (i >= 8) {
-        if ((_buf[0] == _id || _buf[0] == 0) && _crc(i - 2) == _bytesToWord(_buf[i - 1], _buf[i - 2])) {
-          pollstate = STATE_BUILD_REPLY;
+        if(_crc(i - 2) == _bytesToWord(_buf[i - 1], _buf[i - 2])) {
+          if (_buf[0] == _id || _buf[0] == 0 || (_buf[0] <= _limit && (_multiCh > (_buf[0] - _id)))) {
+            pollstate = STATE_BUILD_REPLY;
+            if(_multiCh == 0 || _buf[0] == 0) {
+              _offset = 0;
+            } else {
+              _offset = _buf[0] - _id;
+              Serial2.println("Called with offset: " + String(_offset));
+            }
+          } else {
+            pollstate = STATE_IDLE;
+          }
         } else {
           pollstate = STATE_IDLE;
         }
@@ -141,34 +179,50 @@ void ModbusRTUSlave::poll() {
         case FC_01_R_COILS: /* Read Coils */
           _processBoolRead(_numCoils, _coilRead);
           break;
+
         case FC_02_R_DISCRETEINPUTS: /* Read Discrete Inputs */
           _processBoolRead(_numDiscreteInputs, _discreteInputRead);
           break;
+
         case FC_03_R_HOLDINGREGISTERS: /* Read Holding Registers */
           _processWordRead(_numHoldingRegisters, _holdingRegisterRead);
           break;
+
         case FC_04_R_INPUTREGISTER: /* Read Input Registers */
           _processWordRead(_numInputRegisters, _inputRegisterRead);
           break;
+
         case FC_05_W_SINGLECOIL: /* Write Single Coil */
           {
             uint16_t address = _bytesToWord(_buf[2], _buf[3]);
             uint16_t value = _bytesToWord(_buf[4], _buf[5]);
-            if (value != 0 && value != 0xFF00) _exceptionResponse(3);
-            else if (address >= _numCoils) _exceptionResponse(2);
-            else if (!_coilWrite(address, value)) _exceptionResponse(4);
-            else _write(6);
+            if (value != 0 && value != 0xFF00) { _exceptionResponse(3); break; }
+            if (address >= _numCoils) { _exceptionResponse(2); break; }
+            if (_multiCh > 0) {
+              if (!_coilWrite_mc(address, value, _offset)) { _exceptionResponse(4); break; }
+            } else {
+              if (!_coilWrite(address, value)) { _exceptionResponse(4); break; }
+            }
+            // else
+            _write(6);
           }
           break;
+
         case FC_06_W_SINGLEREGISTER: /* Write Single Holding Register */
           {
             uint16_t address = _bytesToWord(_buf[2], _buf[3]);
             uint16_t value = _bytesToWord(_buf[4], _buf[5]);
-            if (address >= _numHoldingRegisters) _exceptionResponse(2);
-            else if (!_holdingRegisterWrite(address, value)) _exceptionResponse(4);
-            else _write(6);
+            if (address >= _numHoldingRegisters) { _exceptionResponse(2); break; }
+            if (_multiCh > 0) {
+              if (!_holdingRegisterWrite_mc(address, value, _offset)) { _exceptionResponse(4); break; }
+            } else {
+              if (!_holdingRegisterWrite(address, value)) { _exceptionResponse(4); break; }
+            }
+            // else
+            _write(6);
           }
           break;
+
         case FC_15_W_MULTIPLECOILS: /* Write Multiple Coils */
           {
             uint16_t startAddress = _bytesToWord(_buf[2], _buf[3]);
@@ -176,17 +230,28 @@ void ModbusRTUSlave::poll() {
             if (quantity == 0 || quantity > ((_bufSize - 10) << 3) || _buf[6] != _div8RndUp(quantity)) _exceptionResponse(3);
             else if ((startAddress + quantity) > _numCoils) _exceptionResponse(2);
             else {
-              for (uint8_t j = 0; j < quantity; j++) {
-                if (!_coilWrite(startAddress + j, bitRead(_buf[7 + (j >> 3)], j & 7))) {
-                  _exceptionResponse(4);
-                  pollstate = STATE_TRANSMIT;
-                  return;
+              if (_multiCh > 0) {
+                for (uint8_t j = 0; j < quantity; j++) {
+                  if (!_coilWrite_mc(startAddress + j, bitRead(_buf[7 + (j >> 3)], j & 7), _offset)) {
+                    _exceptionResponse(4);
+                    pollstate = STATE_TRANSMIT;
+                    return;
+                  }
                 }
-              }
+            } else {
+                for (uint8_t j = 0; j < quantity; j++) {
+                  if (!_coilWrite(startAddress + j, bitRead(_buf[7 + (j >> 3)], j & 7))) {
+                    _exceptionResponse(4);
+                    pollstate = STATE_TRANSMIT;
+                    return;
+                  }
+                }
+            }
               _write(6);
             }
           }
           break;
+
         case FC_16_W_MULTIPLEREGISTERS: /* Write Multiple Holding Registers */
           {
             uint16_t startAddress = _bytesToWord(_buf[2], _buf[3]);
@@ -194,20 +259,32 @@ void ModbusRTUSlave::poll() {
             if (quantity == 0 || quantity > ((_bufSize - 10) >> 1) || _buf[6] != (quantity * 2)) _exceptionResponse(3);
             else if (startAddress + quantity > _numHoldingRegisters) _exceptionResponse(2);
             else {
-              for (uint8_t j = 0; j < quantity; j++) {
-                if (!_holdingRegisterWrite(startAddress + j, _bytesToWord(_buf[j * 2 + 7], _buf[j * 2 + 8]))) {
-                  _exceptionResponse(4);
-                  pollstate = STATE_TRANSMIT;
-                  return;
+              if (_multiCh > 0) {
+                for (uint8_t j = 0; j < quantity; j++) {
+                  if (!_holdingRegisterWrite_mc(startAddress + j, _bytesToWord(_buf[j * 2 + 7], _buf[j * 2 + 8]), _offset)) {
+                    _exceptionResponse(4);
+                    pollstate = STATE_TRANSMIT;
+                    return;
+                  }
+                }
+              } else {
+                for (uint8_t j = 0; j < quantity; j++) {
+                  if (!_holdingRegisterWrite(startAddress + j, _bytesToWord(_buf[j * 2 + 7], _buf[j * 2 + 8]))) {
+                    _exceptionResponse(4);
+                    pollstate = STATE_TRANSMIT;
+                    return;
+                  }
                 }
               }
               _write(6);
             }
           }
           break;
+
         default:
           _exceptionResponse(1);
           break;
+
       }
       pollstate = STATE_TRANSMIT;
       /* FALLTHROUGH */
@@ -278,6 +355,7 @@ void ModbusRTUSlave::_processBoolRead(uint16_t numBools, BoolRead boolRead) {
     for (uint8_t j = 0; j < quantity; j++) {
       uint8_t err = 0;
       int8_t value = boolRead(startAddress + j, &err);
+
       if (err > 0) {
         _exceptionResponse(err);
         return;
@@ -298,6 +376,50 @@ void ModbusRTUSlave::_processWordRead(uint16_t numWords, WordRead wordRead) {
     for (uint8_t j = 0; j < quantity; j++) {
       uint8_t err = 0;
       int32_t value = wordRead(startAddress + j, &err);
+
+      if (err > 0) {
+        _exceptionResponse(err);
+        return;
+      }
+      _buf[3 + (j * 2)] = highByte(value);
+      _buf[4 + (j * 2)] = lowByte(value);
+    }
+    _buf[2] = quantity * 2;
+    _write(3 + _buf[2]);
+  }
+}
+
+void ModbusRTUSlave::_processBoolRead(uint16_t numBools, BoolRead_mc boolRead) {
+  uint16_t startAddress = _bytesToWord(_buf[2], _buf[3]);
+  uint16_t quantity = _bytesToWord(_buf[4], _buf[5]);
+  if (quantity == 0 || quantity > ((_bufSize - 6) * 8)) _exceptionResponse(3);
+  else if ((startAddress + quantity) > numBools) _exceptionResponse(2);
+  else {
+    for (uint8_t j = 0; j < quantity; j++) {
+      uint8_t err = 0;
+      int8_t value = boolRead(startAddress + j, &err, _offset);
+
+      if (err > 0) {
+        _exceptionResponse(err);
+        return;
+      }
+      bitWrite(_buf[3 + (j >> 3)], j & 7, value);
+    }
+    _buf[2] = _div8RndUp(quantity);
+    _write(3 + _buf[2]);
+  }
+}
+
+void ModbusRTUSlave::_processWordRead(uint16_t numWords, WordRead_mc wordRead) {
+  uint16_t startAddress = _bytesToWord(_buf[2], _buf[3]);
+  uint16_t quantity = _bytesToWord(_buf[4], _buf[5]);
+  if (quantity == 0 || quantity > ((_bufSize - 6) >> 1)) _exceptionResponse(3);
+  else if ((startAddress + quantity) > numWords) _exceptionResponse(2);
+  else {
+    for (uint8_t j = 0; j < quantity; j++) {
+      uint8_t err = 0;
+      int32_t value = wordRead(startAddress + j, &err, _offset);
+
       if (err > 0) {
         _exceptionResponse(err);
         return;
