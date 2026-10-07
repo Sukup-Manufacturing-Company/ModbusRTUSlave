@@ -486,13 +486,13 @@ void ModbusRTUSlave::_processWordRead(uint16_t numWords, WordRead wordRead) {
 	
 	uint16_t startAddress = _bytesToWord(_buf[2], _buf[3]);
 	uint16_t quantity = _bytesToWord(_buf[4], _buf[5]);
-	if (quantity == 0 || quantity > ((_bufSize - 6) >> 1)) _exceptionResponse(3);
-	else if ((startAddress + quantity) > numWords) _exceptionResponse(2);
+	if(quantity == 0 || quantity > ((_bufSize - 6) >> 1)) _exceptionResponse(3);
+	else if((startAddress + quantity) > numWords) _exceptionResponse(2);
 	else {
-		for (uint8_t j = 0; j < quantity; j++) {
+		for(uint8_t j = 0; j < quantity; j++) {
 			uint8_t err = 0;
 			int32_t value = wordRead(startAddress + j, &err);
-			if (err > 0) {
+			if(err > 0) {
 				_exceptionResponse(err);
 				return;
 			}
