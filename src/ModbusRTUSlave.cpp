@@ -159,8 +159,6 @@ void ModbusRTUSlave::poll() {
 
 		case STATE_FRAME_RX:
 
-			Serial2.println("Recieved transmission"); // TEMP
-
 			while (_serial->available() > 0 && i < _bufSize) {
 				_rxStartTime = micros();
 				_buf[i] = _serial->read();
@@ -190,7 +188,6 @@ void ModbusRTUSlave::poll() {
 				} else if((uint8_t(_buf[0] - _id) < _MULTI_CHANNEL)  &&  (_buf[0] <= _mcLimit)) {
 					pollstate = STATE_BUILD_REPLY;
 					_offset = _buf[0] - _id;
-					Serial2.println("Offset: " + String(_offset)); // TEMP
 				} else {
 					pollstate = STATE_IDLE;
 				}
